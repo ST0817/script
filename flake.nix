@@ -30,25 +30,45 @@
             file = ./rust-toolchain.toml;
             sha256 = "sha256-gh/xTkxKHL4eiRXzWv8KP7vfjSk61Iq48x47BEDFgfk=";
           };
+          craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+          src = craneLib.cleanCargoSource ./.;
+          libffi = pkgs.libffi;
+          commonArgs = {
+            inherit src;
+            strictDeps = true;
+            nativeBuildInputs = with pkgs; [ llvm_21 ];
+            buildInputs = [
+              libffi
+              pkgs.libxml2
+              pkgs.zlib
+            ];
+          };
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
         in
-        {
+        rec {
           _module.args.pkgs = import nixpkgs {
             inherit system;
             overlays = [ fenix.overlays.default ];
           };
-          packages.default =
+          packages.default = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
+          devShells.default =
             let
-              craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+              devShell = craneLib.devShell.override {
+                mkShell = pkgs.mkShell.override { stdenv = pkgs.clangStdenv; };
+              };
             in
-            craneLib.buildPackage {
-              src = ./.;
+            devShell {
+              inputsFrom = [ packages.default ];
+              packages = with pkgs; [
+                nixd
+                taplo
+              ];
+              LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+                libffi
+                pkgs.zlib
+                pkgs.stdenv.cc.cc.lib
+              ];
             };
-          devShells.default = pkgs.mkShell {
-            packages = [
-              toolchain
-              pkgs.nixd
-            ];
-          };
         };
     };
 }
