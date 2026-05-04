@@ -1,0 +1,5 @@
+var foo;
+foo <- 42;
+print foo;
+foo <- 53;
+print foo;
