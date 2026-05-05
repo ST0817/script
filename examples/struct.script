@@ -1,0 +1,11 @@
+struct Point {
+    x: Int;
+    y: Int;
+}
+
+var point: Point;
+point.x <- 42;
+point.y <- 53;
+
+print point.x;
+print point.y;

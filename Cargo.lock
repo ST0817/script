@@ -76,7 +76,7 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ba4a05c9ce83b07de31b31c874e87c069881ac4355db9e752e3a55c11ec75a6"
 dependencies = [
- "hashbrown",
+ "hashbrown 0.15.5",
  "regex-automata",
  "serde",
  "stacker",
@@ -135,12 +135,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashbrown"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+
+[[package]]
 name = "home"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
  "windows-sys",
+]
+
+[[package]]
+name = "indexmap"
+version = "2.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+dependencies = [
+ "equivalent",
+ "hashbrown 0.17.0",
 ]
 
 [[package]]
@@ -323,6 +339,7 @@ version = "0.1.0"
 dependencies = [
  "ariadne",
  "chumsky",
+ "indexmap",
  "inkwell",
  "rustyline",
 ]

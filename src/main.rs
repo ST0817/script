@@ -29,6 +29,7 @@ fn print_errors(errors: &Vec<Error>, id: &str, src: &str) {
 
 fn run_file<'src>(src: &'src str) -> Result<'src, ()> {
     let stmts = parse::stmts().parse(src).into_result()?;
+    //dbg!(&stmts);
     let context = Context::create();
     let mut compiler = Compiler::new(&context);
     let module = compiler.create_module("main");
