@@ -28,8 +28,8 @@ fn print_errors(errors: &Vec<Error>, id: &str, src: &str) {
 }
 
 fn run_file<'src>(src: &'src str) -> Result<'src, ()> {
-    let stmts = parse::stmts().parse(src).into_result()?;
-    //dbg!(&stmts);
+    let defs = parse::defs().parse(src).into_result()?;
+    dbg!(&defs);
     let context = Context::create();
     let mut compiler = Compiler::new(&context);
     let module = compiler.create_module("main");
@@ -37,7 +37,7 @@ fn run_file<'src>(src: &'src str) -> Result<'src, ()> {
     let execution_engine = module
         .create_jit_execution_engine(OptimizationLevel::Default)
         .unwrap();
-    let main = compiler.compile_stmts(&stmts, &module, &builder, &execution_engine)?;
+    let main = compiler.compile(&defs, &module, &builder, &execution_engine)?;
     unsafe { main.call() }
     Ok(())
 }
