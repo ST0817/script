@@ -5,7 +5,7 @@ use std::{env::args, fs::read_to_string, process::ExitCode};
 
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
 use chumsky::{Parser, error::Rich};
-use inkwell::{OptimizationLevel, context::Context};
+use inkwell::context::Context;
 
 use crate::compile::Compiler;
 
@@ -32,12 +32,7 @@ fn run_file<'src>(src: &'src str) -> Result<'src, ()> {
     dbg!(&defs);
     let context = Context::create();
     let mut compiler = Compiler::new(&context);
-    let module = compiler.create_module("main");
-    let builder = compiler.create_builder();
-    let execution_engine = module
-        .create_jit_execution_engine(OptimizationLevel::Default)
-        .unwrap();
-    let main = compiler.compile(&defs, &module, &builder, &execution_engine)?;
+    let main = compiler.compile(&defs)?;
     unsafe { main.call() }
     Ok(())
 }

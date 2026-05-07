@@ -27,6 +27,7 @@ pub enum Ref<'src> {
 #[derive(Debug)]
 pub enum Expr<'src> {
     Int(u64),
+    Global(Name<'src>),
     Var(Name<'src>, Type<'src>),
     Print(Spanned<Box<Self>>),
     Assign(Ref<'src>, Spanned<Box<Self>>),
@@ -188,6 +189,10 @@ fn int_expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>
     int().map(Expr::Int)
 }
 
+fn global_expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone {
+    just('@').padded().ignore_then(var_name()).map(Expr::Global)
+}
+
 fn var_expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone {
     keyword("var")
         .padded()
@@ -243,6 +248,7 @@ fn expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> {
     recursive(|expr| {
         let atom = choice((
             int_expr(),
+            global_expr(),
             var_expr(),
             print_expr(expr.clone()),
             assign_expr(expr.clone()),

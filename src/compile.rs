@@ -7,13 +7,13 @@ use std::{
 use chumsky::span::{SimpleSpan, SpanWrap, Spanned};
 use indexmap::IndexMap;
 use inkwell::{
-    AddressSpace,
+    AddressSpace, OptimizationLevel,
     builder::Builder,
     context::Context,
     execution_engine::{ExecutionEngine, JitFunction},
     module::Module,
     types::{BasicType, BasicTypeEnum},
-    values::{BasicValueEnum, PointerValue},
+    values::{BasicValue, BasicValueEnum, PointerValue},
 };
 
 use crate::{
@@ -61,27 +61,32 @@ struct RawRef<'ctx> {
     raw_type: RawType,
 }
 
+type Scope<'ctx> = HashMap<String, RawRef<'ctx>>;
+
 pub struct Compiler<'ctx> {
     context: &'ctx Context,
-    scopes: Vec<HashMap<String, RawRef<'ctx>>>,
+    module: Module<'ctx>,
+    builder: Builder<'ctx>,
+    execution_engine: ExecutionEngine<'ctx>,
+    globals: Scope<'ctx>,
     types: HashMap<String, RawType>,
 }
 
 impl<'ctx> Compiler<'ctx> {
     pub fn new(context: &'ctx Context) -> Self {
+        let module = context.create_module("main");
+        let builder = context.create_builder();
+        let execution_engine = module
+            .create_jit_execution_engine(OptimizationLevel::Default)
+            .unwrap();
         Self {
             context,
-            scopes: vec![HashMap::new()],
+            module,
+            builder,
+            execution_engine,
+            globals: HashMap::new(),
             types: HashMap::new(),
         }
-    }
-
-    pub fn create_module(&self, name: &str) -> Module<'ctx> {
-        self.context.create_module(name)
-    }
-
-    pub fn create_builder(&self) -> Builder<'ctx> {
-        self.context.create_builder()
     }
 
     fn raw_type_of<'src>(&self, ty: &Type<'src>) -> Result<'src, RawType> {
@@ -143,62 +148,84 @@ impl<'ctx> Compiler<'ctx> {
         Ok(())
     }
 
-    fn define_var<'src>(&mut self, name: &Name<'src>, raw_ref: RawRef<'ctx>) -> Result<'src, ()> {
-        if self.scopes.last().unwrap().contains_key(name.inner) {
+    fn define_local<'src>(
+        &mut self,
+        name: &Name<'src>,
+        raw_ref: RawRef<'ctx>,
+        locals: &mut Scope<'ctx>,
+    ) -> Result<'src, ()> {
+        if locals.contains_key(name.inner) {
             return Err(vec![Error::custom(name.span, "variable redefinition")]);
         }
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .insert(name.inner.to_string(), raw_ref);
+        locals.insert(name.inner.to_string(), raw_ref);
         Ok(())
     }
 
-    fn get_var<'src>(&mut self, name: &Name<'src>) -> Result<'src, RawRef<'ctx>> {
-        self.scopes
-            .iter()
-            .rev()
-            .fold(None, |result, scope| {
-                result.or_else(|| scope.get(name.inner))
-            })
-            .cloned()
+    fn get_local<'src, 'scope>(
+        &self,
+        name: &Name<'src>,
+        locals: &'scope Scope<'ctx>,
+    ) -> Result<'src, &'scope RawRef<'ctx>> {
+        locals
+            .get(name.inner)
             .ok_or_else(|| vec![Error::custom(name.span, "undefined variable")])
     }
 
-    fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+    fn define_global<'src>(
+        &mut self,
+        name: &Name<'src>,
+        raw_ref: RawRef<'ctx>,
+    ) -> Result<'src, ()> {
+        if self.globals.contains_key(name.inner) {
+            return Err(vec![Error::custom(
+                name.span,
+                "global variable redefinition",
+            )]);
+        }
+        self.globals.insert(name.inner.to_string(), raw_ref);
+        Ok(())
     }
 
-    fn pop_scope(&mut self) {
-        self.scopes.pop();
+    fn get_global<'src, 'scope>(
+        &'scope self,
+        name: &Name<'src>,
+    ) -> Result<'src, &'scope RawRef<'ctx>> {
+        self.globals
+            .get(name.inner)
+            .ok_or_else(|| vec![Error::custom(name.span, "undefined global variable")])
     }
 
-    fn declare_printf(&mut self, module: &Module<'ctx>) {
+    fn declare_printf(&mut self) {
         let ty = self.context.void_type().fn_type(
             &[self.context.ptr_type(AddressSpace::default()).into()],
             true,
         );
-        module.add_function("printf", ty, None);
+        self.module.add_function("printf", ty, None);
     }
 
-    fn compile_var_ref<'src>(&mut self, name: &Name<'src>) -> Result<'src, RawRef<'ctx>> {
-        self.get_var(name)
+    fn compile_var_ref<'src>(
+        &mut self,
+        name: &Name<'src>,
+        locals: &mut Scope<'ctx>,
+    ) -> Result<'src, RawRef<'ctx>> {
+        self.get_local(name, locals).cloned()
     }
 
     fn compile_access_ref<'src>(
         &mut self,
         reference: &Spanned<Box<Ref<'src>>>,
         field_name: &Name<'src>,
-        builder: &Builder<'ctx>,
+        locals: &mut Scope<'ctx>,
     ) -> Result<'src, RawRef<'ctx>> {
-        let raw_ref = self.compile_ref(&reference, builder)?;
+        let raw_ref = self.compile_ref(&reference, locals)?;
         let RawType::Struct(_, rraw_fialds) = &raw_ref.raw_type else {
             return Err(vec![Error::custom(reference.span, "not an struct")]);
         };
         let (index, _, raw_field_type) = rraw_fialds
             .get_full(field_name.inner)
             .ok_or_else(|| vec![Error::custom(field_name.span, "no field")])?;
-        let field_ptr_value = builder
+        let field_ptr_value = self
+            .builder
             .build_struct_gep(
                 self.llvm_type_of(&raw_ref.raw_type),
                 raw_ref.ptr_value,
@@ -215,12 +242,12 @@ impl<'ctx> Compiler<'ctx> {
     fn compile_ref<'src>(
         &mut self,
         reference: &Ref<'src>,
-        builder: &Builder<'ctx>,
+        locals: &mut Scope<'ctx>,
     ) -> Result<'src, RawRef<'ctx>> {
         match reference {
-            Ref::Var(name) => self.compile_var_ref(name),
+            Ref::Var(name) => self.compile_var_ref(name, locals),
             Ref::Access(reference, field_name) => {
-                self.compile_access_ref(reference, field_name, builder)
+                self.compile_access_ref(reference, field_name, locals)
             }
         }
     }
@@ -232,35 +259,42 @@ impl<'ctx> Compiler<'ctx> {
         })
     }
 
+    fn compile_global<'src>(&mut self, name: &Name<'src>) -> Result<'src, RawValue<'ctx>> {
+        self.get_global(name).cloned().map(|raw_ref| RawValue {
+            value: raw_ref.ptr_value.as_basic_value_enum(),
+            raw_type: raw_ref.raw_type,
+        })
+    }
+
     fn compile_var_expr<'src>(
         &mut self,
         name: &Name<'src>,
         ty: &Type<'src>,
-        builder: &Builder<'ctx>,
+        locals: &mut Scope<'ctx>,
     ) -> Result<'src, RawValue<'ctx>> {
         let raw_type = self.raw_type_of(ty)?;
-        let ptr_value = builder
+        let ptr_value = self
+            .builder
             .build_alloca(self.llvm_type_of(&self.raw_type_of(ty)?), name.inner)
             .unwrap();
         let raw_ref = RawRef {
             ptr_value,
             raw_type,
         };
-        self.define_var(name, raw_ref)?;
+        self.define_local(name, raw_ref, locals)?;
         Ok(self.raw_unit_value())
     }
 
     fn compile_print_expr<'src>(
         &mut self,
         expr: &Spanned<Box<Expr<'src>>>,
-        module: &Module<'ctx>,
-        builder: &Builder<'ctx>,
+        locals: &mut Scope<'ctx>,
     ) -> Result<'src, RawValue<'ctx>> {
-        let printf = module.get_function("printf").unwrap();
-        let raw_value = self.compile_expr(&expr.inner, module, builder)?;
+        let printf = self.module.get_function("printf").unwrap();
+        let raw_value = self.compile_expr(&expr.inner, locals)?;
         self.check_type(&raw_value.raw_type, &RawType::Int, &expr.span)?;
-        let fmt = builder.build_global_string_ptr("%d\n", "fmt").unwrap();
-        builder
+        let fmt = self.builder.build_global_string_ptr("%d\n", "fmt").unwrap();
+        self.builder
             .build_call(
                 printf,
                 &[fmt.as_pointer_value().into(), raw_value.value.into()],
@@ -274,13 +308,12 @@ impl<'ctx> Compiler<'ctx> {
         &mut self,
         reference: &Ref<'src>,
         expr: &Spanned<Box<Expr<'src>>>,
-        module: &Module<'ctx>,
-        builder: &Builder<'ctx>,
+        locals: &mut Scope<'ctx>,
     ) -> Result<'src, RawValue<'ctx>> {
-        let raw_ref = self.compile_ref(reference, builder)?;
-        let raw_value = self.compile_expr(&expr.inner, module, builder)?;
+        let raw_ref = self.compile_ref(reference, locals)?;
+        let raw_value = self.compile_expr(&expr.inner, locals)?;
         self.check_type(&raw_ref.raw_type, &raw_value.raw_type, &expr.span)?;
-        builder
+        self.builder
             .build_store(raw_ref.ptr_value, raw_value.value)
             .unwrap();
         Ok(self.raw_unit_value())
@@ -289,20 +322,17 @@ impl<'ctx> Compiler<'ctx> {
     fn compile_deref_expr<'src>(
         &mut self,
         reference: &Ref<'src>,
-        builder: &Builder<'ctx>,
+        locals: &mut Scope<'ctx>,
     ) -> Result<'src, RawValue<'ctx>> {
-        let raw_ref = self.compile_ref(reference, builder)?;
-        let value = if let RawType::FunPtr(..) = raw_ref.raw_type {
-            raw_ref.ptr_value.into()
-        } else {
-            builder
-                .build_load(
-                    self.llvm_type_of(&raw_ref.raw_type),
-                    raw_ref.ptr_value,
-                    "deref",
-                )
-                .unwrap()
-        };
+        let raw_ref = self.compile_ref(reference, locals)?;
+        let value = self
+            .builder
+            .build_load(
+                self.llvm_type_of(&raw_ref.raw_type),
+                raw_ref.ptr_value,
+                "deref",
+            )
+            .unwrap();
         Ok(RawValue {
             value,
             raw_type: raw_ref.raw_type,
@@ -313,17 +343,16 @@ impl<'ctx> Compiler<'ctx> {
         &mut self,
         callee: &Spanned<Box<Expr<'src>>>,
         args: &Spanned<Vec<Spanned<Expr<'src>>>>,
-        module: &Module<'ctx>,
-        builder: &Builder<'ctx>,
+        locals: &mut Scope<'ctx>,
     ) -> Result<'src, RawValue<'ctx>> {
-        let raw_callee_value = self.compile_expr(&callee.inner, module, builder)?;
+        let raw_callee_value = self.compile_expr(&callee.inner, locals)?;
         let RawType::FunPtr(raw_param_types, raw_return_type) = raw_callee_value.raw_type else {
             return Err(vec![Error::custom(callee.span, "not a function")]);
         };
         let (arg_values, raw_arg_types) = args.iter().try_fold(
             (Vec::new(), Vec::new()),
             |(mut arg_values, mut raw_arg_types), arg| {
-                let raw_arg_value = self.compile_expr(&arg.inner, module, builder)?;
+                let raw_arg_value = self.compile_expr(&arg.inner, locals)?;
                 arg_values.push(raw_arg_value.value.into());
                 raw_arg_types.push(raw_arg_value.raw_type.with_span(arg.span));
                 Ok((arg_values, raw_arg_types)) as Result<_>
@@ -348,7 +377,8 @@ impl<'ctx> Compiler<'ctx> {
         let fun_llvm_type = self
             .llvm_type_of(&raw_return_type)
             .fn_type(&llvm_param_types[..], false);
-        let value = builder
+        let value = self
+            .builder
             .build_indirect_call(
                 fun_llvm_type,
                 raw_callee_value.value.into_pointer_value(),
@@ -365,18 +395,16 @@ impl<'ctx> Compiler<'ctx> {
     fn compile_expr<'src>(
         &mut self,
         expr: &Expr<'src>,
-        module: &Module<'ctx>,
-        builder: &Builder<'ctx>,
+        locals: &mut Scope<'ctx>,
     ) -> Result<'src, RawValue<'ctx>> {
         match expr {
             Expr::Int(value) => self.compile_int_expr(value),
-            Expr::Var(name, ty) => self.compile_var_expr(name, ty, builder),
-            Expr::Print(expr) => self.compile_print_expr(expr, module, builder),
-            Expr::Assign(reference, expr) => {
-                self.compile_assign_expr(reference, expr, module, builder)
-            }
-            Expr::Deref(reference) => self.compile_deref_expr(reference, builder),
-            Expr::Call(callee, args) => self.compile_call_expr(callee, args, module, builder),
+            Expr::Global(name) => self.compile_global(name),
+            Expr::Var(name, ty) => self.compile_var_expr(name, ty, locals),
+            Expr::Print(expr) => self.compile_print_expr(expr, locals),
+            Expr::Assign(reference, expr) => self.compile_assign_expr(reference, expr, locals),
+            Expr::Deref(reference) => self.compile_deref_expr(reference, locals),
+            Expr::Call(callee, args) => self.compile_call_expr(callee, args, locals),
         }
     }
 
@@ -408,8 +436,6 @@ impl<'ctx> Compiler<'ctx> {
         params: &Vec<Param<'src>>,
         return_type: &Type<'src>,
         body: &Spanned<Vec<Expr<'src>>>,
-        module: &Module<'ctx>,
-        builder: &Builder<'ctx>,
     ) -> Result<'src, ()> {
         let raw_param_types = params
             .iter()
@@ -424,56 +450,50 @@ impl<'ctx> Compiler<'ctx> {
         let fun_type = self
             .llvm_type_of(&self.raw_type_of(return_type)?)
             .fn_type(&llvm_param_types[..], false);
-        let fun = module.add_function(name.inner, fun_type, None);
+        let fun = self.module.add_function(name.inner, fun_type, None);
 
         let raw_fun_ptr_type = RawType::FunPtr(raw_param_types, Box::new(raw_return_type.clone()));
         let raw_ref = RawRef {
             ptr_value: fun.as_global_value().as_pointer_value(),
             raw_type: raw_fun_ptr_type,
         };
-        self.define_var(name, raw_ref)?;
+        self.define_global(name, raw_ref)?;
 
-        self.push_scope();
-
+        let mut locals = Scope::new();
         let block = self.context.append_basic_block(fun, "entry");
-        builder.position_at_end(block);
+        self.builder.position_at_end(block);
 
         for (i, param) in params.iter().enumerate() {
             let raw_type = self.raw_type_of(&param.ty)?;
-            let ptr_value = builder
+            let ptr_value = self
+                .builder
                 .build_alloca(self.llvm_type_of(&raw_type), "param")
                 .unwrap();
             let raw_ref = RawRef {
                 ptr_value,
                 raw_type,
             };
-            self.define_var(&param.name, raw_ref)?;
+            self.define_local(&param.name, raw_ref, &mut locals)?;
 
             let value = fun.get_nth_param(i as u32).unwrap();
-            builder.build_store(ptr_value, value).unwrap();
+            self.builder.build_store(ptr_value, value).unwrap();
         }
 
         let raw_value = body.iter().try_fold(self.raw_unit_value(), |_, expr| {
-            self.compile_expr(expr, module, builder)
+            self.compile_expr(expr, &mut locals)
         })?;
 
         self.check_type(&raw_value.raw_type, &raw_return_type, &body.span)?;
-        builder.build_return(Some(&raw_value.value)).unwrap();
+        self.builder.build_return(Some(&raw_value.value)).unwrap();
 
-        self.pop_scope();
         Ok(())
     }
 
-    fn compile_def<'src>(
-        &mut self,
-        def: &Def<'src>,
-        module: &Module<'ctx>,
-        builder: &Builder<'ctx>,
-    ) -> Result<'src, ()> {
+    fn compile_def<'src>(&mut self, def: &Def<'src>) -> Result<'src, ()> {
         match def {
             Def::Struct(name, fields) => self.compile_struct_def(name, fields),
             Def::Fun(name, params, return_type, body) => {
-                self.compile_fun_def(name, params, return_type, body, module, builder)
+                self.compile_fun_def(name, params, return_type, body)
             }
         }
     }
@@ -481,23 +501,21 @@ impl<'ctx> Compiler<'ctx> {
     pub fn compile<'src>(
         &mut self,
         defs: &Vec<Def<'src>>,
-        module: &Module<'ctx>,
-        builder: &Builder<'ctx>,
-        execution_engine: &ExecutionEngine<'ctx>,
     ) -> Result<'src, JitFunction<'ctx, unsafe extern "C" fn()>> {
-        self.declare_printf(module);
+        self.declare_printf();
 
         for def in defs {
-            self.compile_def(def, module, builder)?;
+            self.compile_def(def)?;
         }
 
-        let raw_main_value = self.get_var(&"main".with_span(SimpleSpan::default()))?;
+        let raw_main_ref = self.get_global(&"main".with_span(SimpleSpan::default()))?;
+        let raw_main_type = &raw_main_ref.raw_type;
         self.check_type(
-            &raw_main_value.raw_type,
+            raw_main_type,
             &RawType::FunPtr(Vec::new(), Box::new(RawType::Unit)),
             &SimpleSpan::default(),
         )?;
-        module.print_to_stderr();
-        unsafe { Ok(execution_engine.get_function("main").unwrap()) }
+        self.module.print_to_stderr();
+        unsafe { Ok(self.execution_engine.get_function("main").unwrap()) }
     }
 }

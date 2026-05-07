@@ -1,3 +1,8 @@
 fun second(a: Int, b: Int): Int := b
 
-fun main(): Unit := print second(42, 53)
+fun main(): Unit {
+    var secondFun: fun(Int, Int): Int;
+    secondFun <- @second;
+    print @second(42, 53);
+    print secondFun(42, 53)
+}
