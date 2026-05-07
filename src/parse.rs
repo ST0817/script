@@ -33,6 +33,7 @@ pub enum Expr<'src> {
     Assign(Ref<'src>, Spanned<Box<Self>>),
     Deref(Ref<'src>),
     Call(Spanned<Box<Self>>, Spanned<Vec<Spanned<Self>>>),
+    Add(Spanned<Box<Self>>, Spanned<Box<Self>>),
 }
 
 #[derive(Debug)]
@@ -58,46 +59,50 @@ pub enum Def<'src> {
     ),
 }
 
-// Combinator
-
+// Parens parser := "(" parser ")"
 fn parens<'src, T>(
     parser: impl Parser<'src, &'src str, T, Err<Error<'src>>> + Clone,
 ) -> impl Parser<'src, &'src str, T, Err<Error<'src>>> + Clone {
     parser.delimited_by(just('(').padded(), just(')'))
 }
 
+// ParensComma parser := Parens ( parser ( "," parser )* )?
 fn parens_comma<'src, T>(
     parser: impl Parser<'src, &'src str, T, Err<Error<'src>>> + Clone,
 ) -> impl Parser<'src, &'src str, Vec<T>, Err<Error<'src>>> + Clone {
     parens(parser.padded().separated_by(just(',').padded()).collect())
 }
 
+// Braces parser := "{" parser "}"
 fn braces<'src, T>(
     parser: impl Parser<'src, &'src str, T, Err<Error<'src>>>,
 ) -> impl Parser<'src, &'src str, T, Err<Error<'src>>> {
     parser.delimited_by(just('{').padded(), just('}'))
 }
 
-// Basic
-
+// Int := [0-9]+
 fn int<'src>() -> impl Parser<'src, &'src str, u64, Err<Error<'src>>> + Clone {
     text::int(10).from_str().unwrapped()
 }
 
+// Upper := [A-Z]
 fn upper<'src>() -> impl Parser<'src, &'src str, char, Err<Error<'src>>> + Clone {
     any().filter(char::is_ascii_uppercase).labelled("uppercase")
 }
 
+// Lower := [a-z]
 fn lower<'src>() -> impl Parser<'src, &'src str, char, Err<Error<'src>>> + Clone {
     any().filter(char::is_ascii_lowercase).labelled("lowercase")
 }
 
+// Alphanum := [a-zA-Z0-9]
 fn alphanum<'src>() -> impl Parser<'src, &'src str, char, Err<Error<'src>>> + Clone {
     any()
         .filter(char::is_ascii_alphanumeric)
         .labelled("alphanumeric")
 }
 
+// Name first := first Alphanum* "'"*
 fn name<'src>(
     first: impl Parser<'src, &'src str, char, Err<Error<'src>>> + Clone,
 ) -> impl Parser<'src, &'src str, Name<'src>, Err<Error<'src>>> + Clone {
@@ -108,28 +113,32 @@ fn name<'src>(
         .spanned()
 }
 
+// VarName := Name Lower
 fn var_name<'src>() -> impl Parser<'src, &'src str, Name<'src>, Err<Error<'src>>> + Clone {
     name(lower())
 }
 
+// TypeName := Name Upper
 fn type_name<'src>() -> impl Parser<'src, &'src str, Name<'src>, Err<Error<'src>>> + Clone {
     name(upper())
 }
 
-// Type
-
+// IntType := "Int"
 fn int_type<'src>() -> impl Parser<'src, &'src str, Type<'src>, Err<Error<'src>>> + Clone {
     keyword("Int").map(|_| Type::Int)
 }
 
+// UnitType := "Unit"
 fn unit_type<'src>() -> impl Parser<'src, &'src str, Type<'src>, Err<Error<'src>>> + Clone {
     keyword("Unit").map(|_| Type::Unit)
 }
 
+// NamedType := TypeName
 fn named_type<'src>() -> impl Parser<'src, &'src str, Type<'src>, Err<Error<'src>>> + Clone {
     type_name().map(Type::Named)
 }
 
+// FunType := "fun" (ParensComma Type) ":" Type
 fn fun_type<'src>(
     ty: impl Parser<'src, &'src str, Type<'src>, Err<Error<'src>>> + Clone,
 ) -> impl Parser<'src, &'src str, Type<'src>, Err<Error<'src>>> + Clone {
@@ -143,12 +152,20 @@ fn fun_type<'src>(
         .map(|(param_types, return_type)| Type::Fun(param_types, return_type))
 }
 
+// Type
+//   := IntType
+//    | UnitType
+//    | FunType
 fn ty<'src>() -> impl Parser<'src, &'src str, Type<'src>, Err<Error<'src>>> + Clone {
     recursive(|ty| choice((int_type(), unit_type(), named_type(), fun_type(ty))))
 }
 
-// Ref
+// VarRef := VarName
+fn var_ref<'src>() -> impl Parser<'src, &'src str, Ref<'src>, Err<Error<'src>>> + Clone {
+    var_name().map(Ref::Var)
+}
 
+// AccessRef := Ref "." VarName
 fn access_ref<'src>(
     reference: impl Parser<'src, &'src str, Ref<'src>, Err<Error<'src>>> + Clone,
 ) -> impl Parser<'src, &'src str, Ref<'src>, Err<Error<'src>>> + Clone {
@@ -174,25 +191,25 @@ fn access_ref<'src>(
         .map(|spanned| spanned.inner)
 }
 
-fn var_ref<'src>() -> impl Parser<'src, &'src str, Ref<'src>, Err<Error<'src>>> + Clone {
-    var_name().map(Ref::Var)
-}
-
+// Ref
+//   := VarRef
+//    | AccessRef
 fn reference<'src>() -> impl Parser<'src, &'src str, Ref<'src>, Err<Error<'src>>> + Clone {
     let reference = var_ref();
     access_ref(reference)
 }
 
-// Expr
-
+// IntExpr := Int
 fn int_expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone {
     int().map(Expr::Int)
 }
 
+// GlobalExpr := "@" VarName
 fn global_expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone {
     just('@').padded().ignore_then(var_name()).map(Expr::Global)
 }
 
+// VarExpr := "var" VaeName ":" Type
 fn var_expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone {
     keyword("var")
         .padded()
@@ -204,6 +221,7 @@ fn var_expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>
         .map(|(name, ty)| Expr::Var(name, ty))
 }
 
+// PrintExpr := "print" Expr
 fn print_expr<'src>(
     expr: impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone,
 ) -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone {
@@ -213,6 +231,7 @@ fn print_expr<'src>(
         .map(Expr::Print)
 }
 
+// AssignExpr := Ref "<-" Expr
 fn assign_expr<'src>(
     expr: impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone,
 ) -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone {
@@ -224,10 +243,12 @@ fn assign_expr<'src>(
         .map(|(reference, expr)| Expr::Assign(reference, expr))
 }
 
+// DerefExpr := Ref
 fn deref_expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone {
     reference().map(Expr::Deref)
 }
 
+// CallExpr := Expr (ParensComma Expr)
 fn call_expr<'src>(
     expr: impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone,
 ) -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone {
@@ -244,6 +265,40 @@ fn call_expr<'src>(
         .map(|spanned| spanned.inner)
 }
 
+fn add_expr<'src>(
+    expr: impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone,
+) -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> + Clone {
+    expr.clone()
+        .spanned()
+        .padded()
+        .foldl(
+            just('+')
+                .padded()
+                .ignore_then(expr)
+                .spanned()
+                .padded()
+                .repeated(),
+            |lhs, rhs| {
+                let span: SimpleSpan = (lhs.span.start..rhs.span.end).into();
+                Expr::Add(
+                    Box::new(lhs.inner).with_span(lhs.span),
+                    Box::new(rhs.inner).with_span(rhs.span),
+                )
+                .with_span(span)
+            },
+        )
+        .map(|spanned| spanned.inner)
+}
+
+// Expr
+//   := IntExpr
+//    | GlobalExpr
+//    | VarExpr
+//    | PrintExpr
+//    | AssignExpr
+//    | DerefExpr
+//    | CallExpr
+//    | Parens Expr
 fn expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> {
     recursive(|expr| {
         let atom = choice((
@@ -255,12 +310,12 @@ fn expr<'src>() -> impl Parser<'src, &'src str, Expr<'src>, Err<Error<'src>>> {
             deref_expr(),
             parens(expr),
         ));
-        call_expr(atom)
+        let expr = call_expr(atom);
+        add_expr(expr)
     })
 }
 
-// Def
-
+// Field := VarName ":" Type ";"
 fn field<'src>() -> impl Parser<'src, &'src str, Field<'src>, Err<Error<'src>>> {
     var_name()
         .padded()
@@ -272,6 +327,7 @@ fn field<'src>() -> impl Parser<'src, &'src str, Field<'src>, Err<Error<'src>>> 
         .map(|(name, ty)| Field { name, ty })
 }
 
+// StructDef := "struct" (Braces Field*)
 fn struct_def<'src>() -> impl Parser<'src, &'src str, Def<'src>, Err<Error<'src>>> {
     keyword("struct")
         .padded()
@@ -281,6 +337,7 @@ fn struct_def<'src>() -> impl Parser<'src, &'src str, Def<'src>, Err<Error<'src>
         .map(|(name, fileds)| Def::Struct(name, fileds))
 }
 
+// Param := VarName ":" Type
 fn param<'src>() -> impl Parser<'src, &'src str, Param<'src>, Err<Error<'src>>> + Clone {
     var_name()
         .padded()
@@ -290,6 +347,8 @@ fn param<'src>() -> impl Parser<'src, &'src str, Param<'src>, Err<Error<'src>>> 
         .map(|(name, ty)| Param { name, ty })
 }
 
+// FunBody := ":=" Expr | Braces ( Expr ( ";" Expr )* )?
+// FunDef := "fun" (ParensComma Field) ":" Type FunBody
 fn fun_def<'src>() -> impl Parser<'src, &'src str, Def<'src>, Err<Error<'src>>> {
     keyword("fun")
         .padded()
@@ -312,10 +371,14 @@ fn fun_def<'src>() -> impl Parser<'src, &'src str, Def<'src>, Err<Error<'src>>> 
         .map(|(((name, params), return_type), body)| Def::Fun(name, params, return_type, body))
 }
 
+// Def
+//   := StructDef
+//    | FunDef
 fn def<'src>() -> impl Parser<'src, &'src str, Def<'src>, Err<Error<'src>>> {
     choice((struct_def(), fun_def()))
 }
 
-pub fn defs<'src>() -> impl Parser<'src, &'src str, Vec<Def<'src>>, Err<Error<'src>>> {
+// Program := Def*
+pub fn program<'src>() -> impl Parser<'src, &'src str, Vec<Def<'src>>, Err<Error<'src>>> {
     def().padded().repeated().collect()
 }

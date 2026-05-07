@@ -28,7 +28,7 @@ fn print_errors(errors: &Vec<Error>, id: &str, src: &str) {
 }
 
 fn run_file<'src>(src: &'src str) -> Result<'src, ()> {
-    let defs = parse::defs().parse(src).into_result()?;
+    let defs = parse::program().parse(src).into_result()?;
     dbg!(&defs);
     let context = Context::create();
     let mut compiler = Compiler::new(&context);

@@ -392,6 +392,31 @@ impl<'ctx> Compiler<'ctx> {
         })
     }
 
+    fn compile_add_expr<'src>(
+        &mut self,
+        lhs: &Spanned<Box<Expr<'src>>>,
+        rhs: &Spanned<Box<Expr<'src>>>,
+        locals: &mut Scope<'ctx>,
+    ) -> Result<'src, RawValue<'ctx>> {
+        let raw_lhs_value = self.compile_expr(&lhs.inner, locals)?;
+        let raw_rhs_value = self.compile_expr(&rhs.inner, locals)?;
+        self.check_type(&raw_lhs_value.raw_type, &RawType::Int, &lhs.span)?;
+        self.check_type(&raw_rhs_value.raw_type, &RawType::Int, &rhs.span)?;
+        let value = self
+            .builder
+            .build_int_add(
+                raw_lhs_value.value.into_int_value(),
+                raw_rhs_value.value.into_int_value(),
+                "add",
+            )
+            .unwrap();
+        let raw_value = RawValue {
+            value: value.into(),
+            raw_type: RawType::Int,
+        };
+        Ok(raw_value)
+    }
+
     fn compile_expr<'src>(
         &mut self,
         expr: &Expr<'src>,
@@ -405,6 +430,7 @@ impl<'ctx> Compiler<'ctx> {
             Expr::Assign(reference, expr) => self.compile_assign_expr(reference, expr, locals),
             Expr::Deref(reference) => self.compile_deref_expr(reference, locals),
             Expr::Call(callee, args) => self.compile_call_expr(callee, args, locals),
+            Expr::Add(lhs, rhs) => self.compile_add_expr(lhs, rhs, locals),
         }
     }
 
